@@ -1,0 +1,6 @@
+{
+  "name": "Aurum Terminal",
+  "description": "Professional-grade gold trading environment featuring real-time market action, interactive technical charting, and execution engine controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
