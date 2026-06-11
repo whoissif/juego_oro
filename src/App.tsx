@@ -33,6 +33,16 @@ import OrderBook from './components/OrderBook';
 import ExecutionPanel from './components/ExecutionPanel';
 import PositionsList from './components/PositionsList';
 
+const timeframeToMinutes = (tf: string): number => {
+  switch (tf) {
+    case '1M': return 1;
+    case '5M': return 5;
+    case '15M': return 15;
+    case '1H': return 60;
+    default: return 5;
+  }
+};
+
 export default function App() {
   const [activeView, setActiveView] = useState<string>('dashboard');
   const [vaultBalance, setVaultBalance] = useState<number>(750000.00);
@@ -121,7 +131,7 @@ export default function App() {
             
             // Generate historical data scaled around current genuine gold spot price
             const historicalSize = 80;
-            const initialHistory = generateInitialCandles(historicalSize, basePrice - 4.50, 5);
+            const initialHistory = generateInitialCandles(historicalSize, basePrice - 4.50, timeframeToMinutes(timeframe));
             setCandles(initialHistory);
             
             setTicker(prev => ({
@@ -145,7 +155,7 @@ export default function App() {
       // Fallback or Simulated Mode
       if (active) {
         const historicalSize = 80;
-        const initialHistory = generateInitialCandles(historicalSize, 2042.80, 5);
+        const initialHistory = generateInitialCandles(historicalSize, 2042.80, timeframeToMinutes(timeframe));
         setCandles(initialHistory);
         
         const finalCandle = initialHistory[initialHistory.length - 1];
@@ -407,7 +417,7 @@ export default function App() {
   // MANUALLY TRIGGER RANDOM FEED REGENERATIONS
   const handleRegenerateMarketFeeds = () => {
     const spread = 0.88;
-    const initialHistory = generateInitialCandles(75, 2043.50 + (Math.random() - 0.5) * 8, 5);
+    const initialHistory = generateInitialCandles(75, 2043.50 + (Math.random() - 0.5) * 8, timeframeToMinutes(timeframe));
     setCandles(initialHistory);
     const lastPrice = initialHistory[initialHistory.length - 1].close;
     setCurrentSpotPrice(lastPrice);
