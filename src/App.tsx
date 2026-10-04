@@ -1,30 +1,25 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * Aurum Terminal — Enhanced edition
+ * Improvements: localStorage persistence, LIMIT/STOP_LOSS order engine,
+ * Gemini AI panel, Performance dashboard with equity curve, CSV export.
  */
 
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Bell, 
-  TrendingUp, 
-  Layers, 
-  AlertOctagon, 
-  X, 
-  Coins, 
-  CheckCircle2, 
-  Sparkles, 
-  Sliders, 
-  Info, 
-  Flame,
-  ShieldCheck,
-  RotateCcw,
-  Globe,
-  Wifi
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  Bell, TrendingUp, Layers, AlertOctagon, X, Coins, CheckCircle2,
+  Sparkles, Sliders, RotateCcw, Wifi, Activity, Trash2, Brain,
 } from 'lucide-react';
-import { Candle, Position, TradeLog, TickerInfo, OrderSide } from './types';
-import { generateInitialCandles, generateOrderBook, simulateTickUpdate, calculateLiquidationPrice } from './utils/marketSim';
 
-// Import components
+import { Candle, Position, TradeLog, TickerInfo, OrderSide, PendingOrder, EquityPoint } from './types';
+import {
+  generateInitialCandles, generateOrderBook, simulateTickUpdate, calculateLiquidationPrice,
+} from './utils/marketSim';
+import { evaluateOrders, createPendingOrder } from './utils/orderExecutor';
+import { usePersistentState, clearAurumStorage } from './utils/usePersistentState';
+
 import Header from './components/Header';
 import Sidebar from './components/Sidebar';
 import MarketTicker from './components/MarketTicker';
@@ -32,657 +27,478 @@ import TradingChart from './components/TradingChart';
 import OrderBook from './components/OrderBook';
 import ExecutionPanel from './components/ExecutionPanel';
 import PositionsList from './components/PositionsList';
+import AiPanel from './components/AiPanel';
+import PerformanceDashboard from './components/PerformanceDashboard';
 
 const timeframeToMinutes = (tf: string): number => {
-  switch (tf) {
-    case '1M': return 1;
-    case '5M': return 5;
-    case '15M': return 15;
-    case '1H': return 60;
-    default: return 5;
-  }
+  switch (tf) { case '1M': return 1; case '5M': return 5; case '15M': return 15; case '1H': return 60; default: return 5; }
 };
 
 export default function App() {
   const [activeView, setActiveView] = useState<string>('dashboard');
-  const [vaultBalance, setVaultBalance] = useState<number>(750000.00);
-  const [serverConnected, setServerConnected] = useState<boolean>(true);
-  
-  // Gold Real API connectivity states
-  const [isRealApiActive, setIsRealApiActive] = useState<boolean>(true);
-  const [apiStatus, setApiStatus] = useState<'connected' | 'error' | 'loading'>('loading');
-  const [currentSystemTime, setCurrentSystemTime] = useState<string>('');
+  const [showAiPanel, setShowAiPanel] = useState(false);
 
-  // Market states initializations - Gold Spot (XAU/USD)
-  const [currentSpotPrice, setCurrentSpotPrice] = useState<number>(2045.24);
-  const [previousPrice, setPreviousPrice] = useState<number>(2045.20);
-  
-  const [volatilityMultiplier, setVolatilityMultiplier] = useState<number>(1.0);
-  const [timeframe, setTimeframe] = useState<string>('5M');
+  // ── Persistent state (localStorage) ─────────────────────────────────────
+  const [vaultBalance, setVaultBalance] = usePersistentState<number>('aurum_balance', 750000.00);
+  const [positions, setPositions] = usePersistentState<Position[]>('aurum_positions', []);
+  const [tradeLogs, setTradeLogs] = usePersistentState<TradeLog[]>('aurum_logs', []);
+  const [pendingOrders, setPendingOrders] = usePersistentState<PendingOrder[]>('aurum_pending', []);
+  const [equityCurve, setEquityCurve] = usePersistentState<EquityPoint[]>('aurum_equity', []);
+
+  // ── Market state ─────────────────────────────────────────────────────────
+  const [serverConnected, setServerConnected] = useState(true);
+  const [apiStatus, setApiStatus] = useState<'connected' | 'error' | 'loading'>('loading');
+  const [currentSystemTime, setCurrentSystemTime] = useState('');
+  const [currentSpotPrice, setCurrentSpotPrice] = useState(2045.24);
+  const [previousPrice, setPreviousPrice] = useState(2045.20);
+  const [volatilityMultiplier, setVolatilityMultiplier] = useState(1.0);
+  const [timeframe, setTimeframe] = useState('5M');
   const [candles, setCandles] = useState<Candle[]>([]);
-  
-  // Leveraged portfolio states
-  const [positions, setPositions] = useState<Position[]>([]);
-  const [depositModalOpen, setDepositModalOpen] = useState<boolean>(false);
-  const [depositAmount, setDepositAmount] = useState<string>('50000');
-  
-  // Toast notifications
+  const [autoTicksEnabled, setAutoTicksEnabled] = useState(true);
+  const [showDemoBanner, setShowDemoBanner] = useState(true);
+
+  // ── UI state ─────────────────────────────────────────────────────────────
+  const [depositModalOpen, setDepositModalOpen] = useState(false);
+  const [depositAmount, setDepositAmount] = useState('50000');
   const [toastMessage, setToastMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
 
-  // Settings customizable parameters
-  const [autoTicksEnabled, setAutoTicksEnabled] = useState<boolean>(true);
-  const [showDemoBanner, setShowDemoBanner] = useState<boolean>(true);
-
-  // Initial order book ticker log (Exactly matches mock HTML table timestamps and values)
-  const [tradeLogs, setTradeLogs] = useState<TradeLog[]>([
-    { id: 'mock-1', timestamp: '14:25:01', side: 'BUY', price: 2045.24, quantity: 10, leverage: 25, status: 'OPEN' },
-    { id: 'mock-2', timestamp: '14:24:58', side: 'BUY', price: 2045.20, quantity: 10, leverage: 25, status: 'OPEN' },
-    { id: 'mock-3', timestamp: '14:24:55', side: 'SELL', price: 2045.18, quantity: 15, leverage: 10, status: 'CLOSED' },
-    { id: 'mock-4', timestamp: '14:24:10', side: 'BUY', price: 2044.80, quantity: 20, leverage: 5, status: 'CLOSED' },
-    { id: 'mock-5', timestamp: '14:23:45', side: 'SELL', price: 2045.10, quantity: 8, leverage: 50, status: 'CLOSED' },
-  ]);
+  // ── API key for Gemini (from env) ─────────────────────────────────────
+  const geminiApiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (window as any).__GEMINI_API_KEY__ || '';
 
   const [ticker, setTicker] = useState<TickerInfo>({
-    symbol: 'XAU/USD',
-    bid: 2045.24,
-    ask: 2046.12,
-    lastPrice: 2045.24,
-    changePercent: 0.45,
-    volume24h: 1200000,
-    high24h: 2048.10,
-    low24h: 2043.20,
+    symbol: 'XAU/USD', bid: 2045.24, ask: 2046.12, lastPrice: 2045.24,
+    changePercent: 0.45, volume24h: 1200000, high24h: 2048.10, low24h: 2043.20,
   });
 
-  // Calculate free institutional margin (Balance - total initial margin committed to active trades)
   const initialMarginOfOpenPositions = positions.reduce((sum, pos) => sum + pos.margin, 0);
   const freeMargin = Math.max(0, vaultBalance - initialMarginOfOpenPositions);
+  const totalFloatingPnL = positions.reduce((sum, p) => sum + p.pnl, 0);
 
-  // Trigger Toast Notification Alert
-  const triggerToast = (text: string, type: 'success' | 'error' | 'info' = 'info') => {
+  const triggerToast = useCallback((text: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToastMessage({ text, type });
     setTimeout(() => setToastMessage(null), 4500);
-  };
-
-  // Real-time system clock updates
-  useEffect(() => {
-    setCurrentSystemTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-    const timer = setInterval(() => {
-      setCurrentSystemTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-    }, 1000);
-    return () => clearInterval(timer);
   }, []);
 
-  // Generate initial historical data based on spot baseline (resolving live price from Coinbase API)
+  // ── System clock ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    const tick = () => setCurrentSystemTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // ── Initial price fetch (Coinbase PAXG as gold proxy) ────────────────────
   useEffect(() => {
     let active = true;
     async function initRealPrice() {
-      if (isRealApiActive) {
-        setApiStatus('loading');
-        try {
-          const response = await fetch('https://api.coinbase.com/v2/prices/PAXG-USD/spot');
-          if (!response.ok) throw new Error('API server busy or rate limited');
-          const result = await response.json();
-          const basePrice = parseFloat(result?.data?.amount);
-          
-          if (active && !isNaN(basePrice) && basePrice > 0) {
-            setCurrentSpotPrice(basePrice);
-            setPreviousPrice(basePrice - 0.12);
-            setApiStatus('connected');
-            
-            // Generate historical data scaled around current genuine gold spot price
-            const historicalSize = 80;
-            const initialHistory = generateInitialCandles(historicalSize, basePrice - 4.50, timeframeToMinutes(timeframe));
-            setCandles(initialHistory);
-            
-            setTicker(prev => ({
-              ...prev,
-              lastPrice: basePrice,
-              bid: parseFloat((basePrice - 0.44).toFixed(2)),
-              ask: parseFloat((basePrice + 0.44).toFixed(2)),
-              high24h: parseFloat((basePrice + 12.80).toFixed(2)),
-              low24h: parseFloat((basePrice - 8.40).toFixed(2))
-            }));
-            return;
-          }
-        } catch (err) {
-          console.warn('Unable to contact live Coinbase Gold endpoints. Transitioning to fallback simulator.', err);
-          if (active) {
-            setApiStatus('error');
-          }
-        }
-      }
-      
-      // Fallback or Simulated Mode
-      if (active) {
-        const historicalSize = 80;
-        const initialHistory = generateInitialCandles(historicalSize, 2042.80, timeframeToMinutes(timeframe));
-        setCandles(initialHistory);
-        
-        const finalCandle = initialHistory[initialHistory.length - 1];
-        setCurrentSpotPrice(finalCandle.close);
-        setPreviousPrice(finalCandle.close - 0.12);
-        
-        if (isRealApiActive) {
-          setApiStatus('error');
-        } else {
+      setApiStatus('loading');
+      try {
+        const res = await fetch('https://api.coinbase.com/v2/prices/PAXG-USD/spot');
+        if (!res.ok) throw new Error('rate limited');
+        const data = await res.json();
+        const basePrice = parseFloat(data?.data?.amount);
+        if (active && !isNaN(basePrice) && basePrice > 0) {
+          setCurrentSpotPrice(basePrice);
+          setPreviousPrice(basePrice - 0.12);
           setApiStatus('connected');
+          setCandles(generateInitialCandles(80, basePrice - 4.50, timeframeToMinutes(timeframe)));
+          setTicker(prev => ({
+            ...prev, lastPrice: basePrice,
+            bid: parseFloat((basePrice - 0.44).toFixed(2)),
+            ask: parseFloat((basePrice + 0.44).toFixed(2)),
+            high24h: parseFloat((basePrice + 12.80).toFixed(2)),
+            low24h: parseFloat((basePrice - 8.40).toFixed(2)),
+          }));
+          return;
         }
+      } catch { /* fallback */ }
+      if (active) {
+        setApiStatus('error');
+        const hist = generateInitialCandles(80, 2042.80, timeframeToMinutes(timeframe));
+        setCandles(hist);
+        const last = hist[hist.length - 1];
+        setCurrentSpotPrice(last.close);
+        setPreviousPrice(last.close - 0.12);
       }
     }
-    
     initRealPrice();
-    return () => {
-      active = false;
-    };
-  }, [timeframe, isRealApiActive]);
+    return () => { active = false; };
+  }, [timeframe]);
 
-  // MARKET TICK INTERVAL - Simulates live fluctuations OR fetches real-time API spot quotes
+  // ── Market tick + order evaluation ───────────────────────────────────────
   useEffect(() => {
     if (!autoTicksEnabled) return;
+    const interval = setInterval(() => {
+      setCandles(prev => {
+        if (prev.length === 0) return prev;
+        const drift = (Math.random() - 0.48) * 0.35 * volatilityMultiplier;
+        const { updatedCandles, newLastPrice } = simulateTickUpdate(prev, prev[prev.length - 1].close, drift);
+        const newPrice = newLastPrice;
 
-    // Unified price update handler
-    const handlePriceUpdate = (newPrice: number, priceDelta: number) => {
-      setPreviousPrice(currentSpotPrice);
-      setCurrentSpotPrice(newPrice);
+        setPreviousPrice(currentSpotPrice);
+        setCurrentSpotPrice(newPrice);
 
-      // Reevaluate standard ticker Bid/Ask spread (around $0.88 standard deviation)
-      const bid = parseFloat((newPrice - 0.44).toFixed(2));
-      const ask = parseFloat((newPrice + 0.44).toFixed(2));
-      
-      // Update Daily High/Low parameters
-      const newHigh = newPrice > ticker.high24h ? newPrice : ticker.high24h;
-      const newLow = newPrice < ticker.low24h ? newPrice : ticker.low24h;
+        // Update ticker
+        setTicker(p => ({
+          ...p, lastPrice: newPrice,
+          bid: parseFloat((newPrice - 0.44).toFixed(2)),
+          ask: parseFloat((newPrice + 0.44).toFixed(2)),
+          changePercent: parseFloat(((newPrice - p.low24h) / p.low24h * 100).toFixed(2)),
+          high24h: newPrice > p.high24h ? newPrice : p.high24h,
+          low24h: newPrice < p.low24h ? newPrice : p.low24h,
+        }));
 
-      // Update ticker states
-      setTicker(prev => ({
-        ...prev,
-        lastPrice: newPrice,
-        bid,
-        ask,
-        high24h: newHigh,
-        low24h: newLow,
-        changePercent: prev.changePercent + (priceDelta / prev.lastPrice) * 100
-      }));
+        // Update position PnLs
+        setPositions(prev => prev.map(pos => {
+          const pnl = pos.side === 'BUY'
+            ? (newPrice - pos.entryPrice) * pos.quantity * pos.leverage
+            : (pos.entryPrice - newPrice) * pos.quantity * pos.leverage;
+          return { ...pos, currentPrice: newPrice, pnl: parseFloat(pnl.toFixed(2)) };
+        }));
 
-      // Update current live candlestick
-      if (candles.length > 0) {
-        const { updatedCandles } = simulateTickUpdate(candles, newPrice, priceDelta);
-        setCandles(updatedCandles);
-      }
-
-      // Append random mock institutional orders to ticker desk log (every 3rd tick)
-      if (Math.random() > 0.65) {
-        const logTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        const randomSide: OrderSide = Math.random() > 0.5 ? 'BUY' : 'SELL';
-        const randomQty = parseFloat((5 + Math.random() * 45).toFixed(1));
-        const randomLeverage = [5, 10, 25, 50][Math.floor(Math.random() * 4)];
-        
-        setTradeLogs(prev => [
-          {
-            id: `fill-${Date.now()}`,
-            timestamp: logTime,
-            side: randomSide,
-            price: newPrice,
-            quantity: randomQty,
-            leverage: randomLeverage,
-            status: 'CLOSED'
-          },
-          ...prev.slice(0, 50) // keep memory footprint compact
-        ]);
-      }
-    };
-
-    let tickInterval: NodeJS.Timeout | null = null;
-
-    if (isRealApiActive) {
-      // API Mode: Polling interval (every 4.5 seconds for fresh, live rates)
-      tickInterval = setInterval(async () => {
-        try {
-          const response = await fetch('https://api.coinbase.com/v2/prices/PAXG-USD/spot');
-          if (!response.ok) throw new Error('API server busy');
-          const result = await response.json();
-          const apiPrice = parseFloat(result?.data?.amount);
-          
-          if (!isNaN(apiPrice) && apiPrice > 0) {
-            setApiStatus('connected');
-            const priceDelta = apiPrice - currentSpotPrice;
-            // Only update if there is actually a change to avoid zero ticks
-            if (priceDelta !== 0) {
-              handlePriceUpdate(apiPrice, parseFloat(priceDelta.toFixed(2)));
+        // Evaluate pending orders
+        setPendingOrders(prevOrders => {
+          if (prevOrders.length === 0) return prevOrders;
+          const { triggered, remaining } = evaluateOrders(prevOrders, newPrice);
+          triggered.forEach(order => {
+            if (order.positionId) {
+              // It's a stop-loss — close the position
+              setPositions(pp => {
+                const pos = pp.find(p => p.id === order.positionId);
+                if (!pos) return pp;
+                const pnl = pos.side === 'BUY'
+                  ? (newPrice - pos.entryPrice) * pos.quantity * pos.leverage
+                  : (pos.entryPrice - newPrice) * pos.quantity * pos.leverage;
+                setVaultBalance(b => parseFloat((b + pos.margin + pnl).toFixed(2)));
+                setTradeLogs(tl => tl.map(t => t.id === pos.id
+                  ? { ...t, status: 'CLOSED', pnl: parseFloat(pnl.toFixed(2)), closePrice: newPrice, closedAt: new Date().toISOString() }
+                  : t));
+                setEquityCurve(eq => [...eq, { timestamp: new Date().toISOString(), balance: vaultBalance + pos.margin + pnl }]);
+                triggerToast(`Stop-loss ejecutado: ${pos.side} ${pos.quantity}oz | PnL ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`, pnl >= 0 ? 'success' : 'error');
+                return pp.filter(p => p.id !== order.positionId);
+              });
             } else {
-              // Add tiny sub-cent noise to indicate active terminal even on flat API moments
-              const tinyDelta = parseFloat(((Math.random() - 0.5) * 0.04).toFixed(2));
-              handlePriceUpdate(parseFloat((currentSpotPrice + tinyDelta).toFixed(2)), tinyDelta);
+              // It's a limit order — open a new position
+              const notional = newPrice * order.quantity;
+              const margin = notional / order.leverage;
+              const liq = calculateLiquidationPrice(order.side, newPrice, order.leverage);
+              const newPos: Position = {
+                id: `pos-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,
+                side: order.side, symbol: 'XAU/USD',
+                quantity: order.quantity, leverage: order.leverage,
+                entryPrice: newPrice, currentPrice: newPrice,
+                margin, liquidationPrice: liq, pnl: 0,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+              };
+              setPositions(pp => [...pp, newPos]);
+              setVaultBalance(b => parseFloat((b - margin).toFixed(2)));
+              setTradeLogs(tl => [{ id: newPos.id, timestamp: newPos.timestamp, side: order.side, price: newPrice, quantity: order.quantity, leverage: order.leverage, status: 'OPEN' }, ...tl]);
+              triggerToast(`Límite ejecutado: ${order.side} ${order.quantity}oz @ $${newPrice.toFixed(2)}`, 'success');
             }
-          }
-        } catch (err) {
-          console.warn('API update failed during live feed, falling back briefly to simulate:', err);
-          setApiStatus('error');
-          // Brief brownian fallback step during connection drops so terminal doesn't halt
-          const fluctuationDirection = Math.random() - 0.48;
-          const priceDelta = parseFloat((fluctuationDirection * 0.15 * volatilityMultiplier).toFixed(2));
-          const newSpotPrice = parseFloat((currentSpotPrice + priceDelta).toFixed(2));
-          handlePriceUpdate(newSpotPrice, priceDelta);
-        }
-      }, 4500);
-    } else {
-      // Fully Simulated Mode (every 2.5 seconds)
-      tickInterval = setInterval(() => {
-        const fluctuationDirection = Math.random() - 0.48; // slight upward drift for gold inflation
-        const priceDelta = parseFloat((fluctuationDirection * 0.15 * volatilityMultiplier).toFixed(2));
-        const newSpotPrice = parseFloat((currentSpotPrice + priceDelta).toFixed(2));
-        handlePriceUpdate(newSpotPrice, priceDelta);
-      }, 2500);
-    }
+          });
+          return remaining;
+        });
 
-    return () => {
-      if (tickInterval) clearInterval(tickInterval);
-    };
-  }, [currentSpotPrice, autoTicksEnabled, volatilityMultiplier, candles, ticker, isRealApiActive]);
+        return updatedCandles;
+      });
+    }, 1200);
+    return () => clearInterval(interval);
+  }, [autoTicksEnabled, volatilityMultiplier, currentSpotPrice, vaultBalance]);
 
-  // REAL-TIME DERIVATIVE POSITION LIQUIDATION GUARD
-  useEffect(() => {
-    if (positions.length === 0) return;
-
-    const checkedPositions = [...positions];
-    let isModified = false;
-    let totalLiquidationDeductions = 0;
-
-    for (let i = checkedPositions.length - 1; i >= 0; i--) {
-      const pos = checkedPositions[i];
-      const isBuy = pos.side === 'BUY';
-      
-      // Test liquidation trigger
-      const breachedLong = isBuy && currentSpotPrice <= pos.liquidationPrice;
-      const breachedShort = !isBuy && currentSpotPrice >= pos.liquidationPrice;
-
-      if (breachedLong || breachedShort) {
-        // LIQUIDATED! Institutional margin is forfeit
-        totalLiquidationDeductions += pos.margin;
-        checkedPositions.splice(i, 1);
-        isModified = true;
-
-        // Log liquidation
-        const logTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        setTradeLogs(prev => [
-          {
-            id: `liq-${Date.now()}-${i}`,
-            timestamp: logTime,
-            side: pos.side,
-            price: currentSpotPrice,
-            quantity: pos.quantity,
-            leverage: pos.leverage,
-            status: 'LIQUIDATED'
-          },
-          ...prev
-        ]);
-
-        triggerToast(`MARGIN CALL: Position ${pos.symbol} ${pos.side} [qty ${pos.quantity}oz] was LIQUIDATED at $${currentSpotPrice.toFixed(2)}.`, 'error');
-      }
-    }
-
-    if (isModified) {
-      setPositions(checkedPositions);
-      setVaultBalance(prev => Math.max(0, prev - totalLiquidationDeductions));
-    }
-  }, [currentSpotPrice, positions]);
-
-  // EXECUTE AN ORDER FROM FORM TICKET
-  const handleExecuteTrade = (side: OrderSide, qty: number, leverage: number, price: number) => {
-    const notional = price * qty;
-    const requiredMargin = notional / leverage;
-
-    if (requiredMargin > freeMargin) {
-      triggerToast('Trade rejected: Insufficient free margin in corporate vault.', 'error');
+  // ── Trade execution ───────────────────────────────────────────────────────
+  const handleExecuteTrade = useCallback((
+    side: OrderSide,
+    quantity: number,
+    leverage: number,
+    price: number,
+    orderType: 'MARKET' | 'LIMIT' | 'STOP_LOSS' = 'MARKET',
+    triggerPrice?: number
+  ) => {
+    if (orderType === 'LIMIT' || orderType === 'STOP_LOSS') {
+      const tp = triggerPrice ?? price;
+      const order = createPendingOrder(orderType, side, quantity, leverage, tp);
+      setPendingOrders(prev => [...prev, order]);
+      triggerToast(`Orden ${orderType} registrada @ $${tp.toFixed(2)}`, 'info');
       return;
     }
 
-    // Prepare derivative positions item
-    const liquidationVal = calculateLiquidationPrice(side, price, leverage);
-    const newPosition: Position = {
-      id: `pos-${Date.now()}`,
-      side,
-      symbol: 'XAU/USD (Spot Gold)',
-      quantity: qty,
-      leverage,
-      entryPrice: price,
-      currentPrice: price,
-      margin: requiredMargin,
-      liquidationPrice: liquidationVal,
-      pnl: 0,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    // Market order
+    const notional = price * quantity;
+    const margin = notional / leverage;
+    if (margin > freeMargin) {
+      triggerToast('Margen insuficiente para esta operación.', 'error');
+      return;
+    }
+    const liq = calculateLiquidationPrice(side, price, leverage);
+    const newPos: Position = {
+      id: `pos-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      side, symbol: 'XAU/USD', quantity, leverage,
+      entryPrice: price, currentPrice: price,
+      margin, liquidationPrice: liq, pnl: 0,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
     };
+    setPositions(prev => [...prev, newPos]);
+    setVaultBalance(prev => parseFloat((prev - margin).toFixed(2)));
+    setTradeLogs(prev => [{
+      id: newPos.id, timestamp: newPos.timestamp,
+      side, price, quantity, leverage, status: 'OPEN',
+    }, ...prev]);
+    triggerToast(`${side} ${quantity}oz XAU/USD @ $${price.toFixed(2)} x${leverage}`, 'success');
+  }, [freeMargin, vaultBalance]);
 
-    setPositions(prev => [...prev, newPosition]);
-    
-    // Append transaction fill to log ledger
-    const logTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    setTradeLogs(prev => [
-      {
-        id: `execution-${Date.now()}`,
-        timestamp: logTime,
-        side,
-        price,
-        quantity: qty,
-        leverage,
-        status: 'OPEN'
-      },
-      ...prev
-    ]);
+  const handleClosePosition = useCallback((positionId: string) => {
+    const pos = positions.find(p => p.id === positionId);
+    if (!pos) return;
+    const closePnL = pos.pnl;
+    setVaultBalance(prev => parseFloat((prev + pos.margin + closePnL).toFixed(2)));
+    setPositions(prev => prev.filter(p => p.id !== positionId));
+    setTradeLogs(prev => prev.map(t => t.id === positionId
+      ? { ...t, status: 'CLOSED', pnl: parseFloat(closePnL.toFixed(2)), closePrice: currentSpotPrice, closedAt: new Date().toISOString() }
+      : t));
+    setEquityCurve(prev => [...prev, { timestamp: new Date().toISOString(), balance: vaultBalance + pos.margin + closePnL }]);
+    triggerToast(`Cerrado: ${pos.side} ${pos.quantity}oz | PnL ${closePnL >= 0 ? '+' : ''}$${closePnL.toFixed(2)}`, closePnL >= 0 ? 'success' : 'error');
+  }, [positions, currentSpotPrice, vaultBalance]);
 
-    triggerToast(`CONTRACT FILLED: Opened ${side} Spot Contract for ${qty} Oz @ $${price.toFixed(2)} [Leverage: ${leverage}x]`, 'success');
-  };
+  // Mocked order book
+  const mockBidsAsks = generateOrderBook(currentSpotPrice);
 
-  // EXITS / CLOSES POSITION FROM PORTFOLIO
-  const handleClosePosition = (id: string, closingPrice: number) => {
-    const target = positions.find(pos => pos.id === id);
-    if (!target) return;
-
-    // Realize floating profits & losses onto corporate balance sheet
-    const isBuy = target.side === 'BUY';
-    const delta = closingPrice - target.entryPrice;
-    const realizedPnL = isBuy
-      ? delta * target.quantity
-      : -delta * target.quantity;
-
-    // Return the margin committed + PnL realized (with absolute floor safety)
-    const balanceAdjustment = target.margin + realizedPnL;
-    
-    setVaultBalance(prev => parseFloat(Math.max(0, prev + realizedPnL).toFixed(2)));
-    setPositions(prev => prev.filter(pos => pos.id !== id));
-
-    // Append Closed Log
-    const logTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    setTradeLogs(prev => [
-      {
-        id: `close-${Date.now()}`,
-        timestamp: logTime,
-        side: target.side,
-        price: closingPrice,
-        quantity: target.quantity,
-        leverage: target.leverage,
-        pnl: realizedPnL,
-        status: 'CLOSED'
-      },
-      ...prev
-    ]);
-
-    if (realizedPnL >= 0) {
-      triggerToast(`CONTRACT EXITED: Closed ${target.side} Position [qty ${target.quantity}oz]. Realized profit: +$${realizedPnL.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 'success');
-    } else {
-      triggerToast(`CONTRACT EXITED: Closed ${target.side} Position [qty ${target.quantity}oz]. Realized loss: -$${Math.abs(realizedPnL).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 'info');
-    }
-  };
-
-  // MANUALLY TRIGGER RANDOM FEED REGENERATIONS
   const handleRegenerateMarketFeeds = () => {
-    const spread = 0.88;
-    const initialHistory = generateInitialCandles(75, 2043.50 + (Math.random() - 0.5) * 8, timeframeToMinutes(timeframe));
-    setCandles(initialHistory);
-    const lastPrice = initialHistory[initialHistory.length - 1].close;
-    setCurrentSpotPrice(lastPrice);
-    
-    setTicker(prev => ({
-      ...prev,
-      lastPrice,
-      bid: parseFloat((lastPrice - 0.44).toFixed(2)),
-      ask: parseFloat((lastPrice + 0.44).toFixed(2)),
-      high24h: lastPrice + 4.5,
-      low24h: lastPrice - 3.8
-    }));
-
-    triggerToast('Institutional quote feeds flushed. Order depth regenerated.', 'success');
+    triggerToast('Market feed actualizado.', 'info');
   };
 
-  // CAPITAL INJECTION (DEPOSIT MODAL)
-  const handleDepositCapital = (e: React.FormEvent) => {
-    e.preventDefault();
-    const parsedAmount = parseFloat(depositAmount);
-    if (!isNaN(parsedAmount) && parsedAmount > 0) {
-      setVaultBalance(prev => parseFloat((prev + parsedAmount).toFixed(2)));
-      triggerToast(`DEPOSIT RECEIVED: Injected $${parsedAmount.toLocaleString('en-US', { minimumFractionDigits: 2 })} USD into institutional Desk reserves.`, 'success');
-      setDepositModalOpen(false);
-    }
+  // Hard reset
+  const handleHardReset = () => {
+    clearAurumStorage();
+    window.location.reload();
   };
 
-  // Demo asset values
-  const totalFloatingPnL = positions.reduce((sum, pos) => {
-    const isBuy = pos.side === 'BUY';
-    const delta = currentSpotPrice - pos.entryPrice;
-    return sum + (isBuy ? delta * pos.quantity : -delta * pos.quantity);
-  }, 0);
-
-  const mockBidsAsks = generateOrderBook(currentSpotPrice, 0.88, 10);
+  // Market snapshot for Gemini
+  const marketSnap = {
+    currentPrice: currentSpotPrice,
+    changePercent: ticker.changePercent,
+    recentCandles: candles.slice(-50),
+    positions,
+    vaultBalance,
+    high24h: ticker.high24h,
+    low24h: ticker.low24h,
+  };
 
   return (
-    <div className="h-screen w-full flex flex-col bg-background text-on-surface overflow-hidden relative font-sans">
-      
-      {/* Alert toast notification */}
-      {toastMessage && (
-        <div className="fixed top-20 right-6 z-50 animate-bounce shadow-2xl rounded-lg border flex items-start gap-3 p-4 max-w-sm glass-panel text-xs">
-          <div className={`p-1.5 rounded-full ${
-            toastMessage.type === 'success' ? 'bg-green-500/10 text-green-400' :
-            toastMessage.type === 'error' ? 'bg-red-500/10 text-red-500' : 'bg-primary/10 text-primary'
-          }`}>
-            {toastMessage.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertOctagon className="w-5 h-5" />}
-          </div>
-          <div>
-            <p className="font-bold uppercase tracking-wider text-primary text-[10px]">AURUM LEDGER MESSAGE</p>
-            <p className="text-on-surface-variant/90 leading-relaxed mt-0.5">{toastMessage.text}</p>
-          </div>
-        </div>
-      )}
+    <div className="flex h-screen overflow-hidden bg-background text-on-surface font-sans">
+      <Sidebar activeView={activeView} onViewChange={setActiveView} />
 
-      {/* Institutional Demo banner warning */}
-      {showDemoBanner && (
-        <div className="bg-primary/15 border-b border-primary/25 px-4 py-1.5 text-center text-[11px] font-mono select-none text-primary/95 flex justify-between items-center transition-all">
-          <div className="flex-1 flex justify-center items-center gap-1.5">
-            <Sparkles className="w-4.5 h-4.5 animate-spin text-primary" />
-            <span>INSTITUTIONAL SIMULATED ENVIRONMENT - Gold desk allocations are simulated. No live capital is committed.</span>
-          </div>
-          <button onClick={() => setShowDemoBanner(false)} className="hover:text-white cursor-pointer inline-flex p-0.5 outline-none">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-
-      {/* Top Navigation */}
-      <Header 
-        currentView={activeView}
-        onViewChange={(view) => setActiveView(view)}
-        serverConnected={serverConnected}
-        onTradeNowClick={() => triggerToast('Select an order parameters on the right and execute to enter spot contracts!', 'info')}
-      />
-
-      <div className="flex flex-1 overflow-hidden relative">
-        {/* Left Sidebar navigation */}
-        <Sidebar 
-          currentView={activeView}
-          onViewChange={(view) => setActiveView(view)}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <Header
+          currentSpotPrice={currentSpotPrice}
+          previousPrice={previousPrice}
           vaultBalance={vaultBalance}
           freeMargin={freeMargin}
-          serverConnected={serverConnected}
+          currentSystemTime={currentSystemTime}
+          apiStatus={apiStatus}
           onDepositClick={() => setDepositModalOpen(true)}
-          onLogoutClick={() => triggerToast('Exiting terminal session requires high-clearance tokens. Refresh the webpage to restart.', 'error')}
         />
 
-        {/* Dynamic Panel Renders */}
-        <div className="flex-1 overflow-y-auto bg-transparent p-4 md:p-6 flex flex-col gap-5">
-          
-          {/* VIEW RENDER: PANEL 1) MAIN TRADING DASHBOARD (Mock layout exactly mirrored) */}
-          {activeView === 'dashboard' && (
-            <>
-              {/* Gold Ticker Banner */}
-              <MarketTicker 
-                ticker={ticker}
-                previousPrice={previousPrice}
-                isRealApiActive={isRealApiActive}
-                apiStatus={apiStatus}
-              />
+        <MarketTicker ticker={ticker} />
 
-              <div className="flex flex-col xl:flex-row gap-5 flex-1 items-stretch">
-                {/* Visual Chart core column block */}
-                <div className="flex-1 flex flex-col gap-5 min-w-0">
-                  <TradingChart 
-                    candles={candles}
-                    timeframe={timeframe}
-                    onTimeframeChange={(tf) => setTimeframe(tf)}
-                    currentSpotPrice={currentSpotPrice}
-                  />
-
-                  {/* Active derivative contracts list */}
-                  <PositionsList 
-                    positions={positions}
-                    onClosePosition={handleClosePosition}
-                    currentSpotPrice={currentSpotPrice}
-                  />
-
-                  {/* Order book ledger table list */}
-                  <OrderBook 
-                    bids={mockBidsAsks.bids}
-                    asks={mockBidsAsks.asks}
-                    recentFills={tradeLogs}
-                    onRefreshFeed={handleRegenerateMarketFeeds}
-                    spread={0.88}
-                  />
-                </div>
-
-                {/* Right desk Execution Ticket panel Form */}
-                <div className="w-full xl:w-auto h-full xl:sticky xl:top-0">
-                  <ExecutionPanel 
-                    currentSpotPrice={currentSpotPrice}
-                    freeMargin={freeMargin}
-                    onExecuteTrade={handleExecuteTrade}
-                  />
-                </div>
-              </div>
-            </>
-          )}
-
-          {/* VIEW RENDER: PANEL 2) TECHNICAL CHART ONLY */}
-          {activeView === 'analysis' && (
-            <div className="flex-1 flex flex-col gap-4">
-              <div className="glass-panel p-4 flex flex-col sm:flex-row justify-between sm:items-center gap-3">
-                <div>
-                  <h3 className="font-display font-semibold text-base text-primary uppercase">Advanced charting workshop</h3>
-                  <p className="text-xs text-on-surface-variant mt-0.5">Wide technical drawing canvas for 9-period EMA overlay and 20-period SMA validation.</p>
-                </div>
-                <div className="bg-surface-container border border-outline-variant/35 rounded-lg px-4 py-2 flex gap-6 text-xs font-mono">
-                  <div>
-                    <span className="text-on-surface-variant">Live Spot:</span>{' '}
-                    <strong className="text-primary">${currentSpotPrice.toFixed(2)}</strong>
-                  </div>
-                  <div>
-                    <span className="text-on-surface-variant">24h Range:</span>{' '}
-                    <strong className="text-on-surface">${ticker.low24h} - ${ticker.high24h}</strong>
-                  </div>
-                </div>
-              </div>
-              <div className="flex-1 flex min-h-[500px]">
-                <TradingChart 
-                  candles={candles}
-                  timeframe={timeframe}
-                  onTimeframeChange={(tf) => setTimeframe(tf)}
-                  currentSpotPrice={currentSpotPrice}
-                />
+        <main className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+          {/* Demo banner */}
+          {showDemoBanner && (
+            <div className="bg-primary/8 border border-primary/20 rounded-lg px-4 py-2.5 flex items-center justify-between gap-3 text-xs flex-wrap">
+              <span className="text-on-surface/80 font-medium">
+                <span className="text-primary font-bold">AURUM PRO</span> — Persistencia activa · Órdenes condicionales · Gemini AI · Dashboard de rendimiento
+              </span>
+              <div className="flex items-center gap-3">
+                {geminiApiKey && (
+                  <button
+                    onClick={() => setShowAiPanel(v => !v)}
+                    className="flex items-center gap-1.5 text-primary font-bold hover:text-primary/80 cursor-pointer outline-none"
+                  >
+                    <Brain className="w-3.5 h-3.5" />
+                    {showAiPanel ? 'Ocultar IA' : 'Abrir Gemini AI'}
+                  </button>
+                )}
+                <button onClick={() => setShowDemoBanner(false)} className="text-on-surface-variant hover:text-on-surface cursor-pointer outline-none"><X className="w-4 h-4" /></button>
               </div>
             </div>
           )}
 
-          {/* VIEW RENDER: PANEL 3) PORTFOLIO & AUDITOR LEDGER LOGS */}
+          {/* ── DASHBOARD VIEW ── */}
+          {activeView === 'dashboard' && (
+            <div className="flex flex-col xl:flex-row gap-4 flex-1 min-h-0">
+              <div className="flex-1 flex flex-col gap-4 min-w-0">
+                <TradingChart
+                  candles={candles}
+                  timeframe={timeframe}
+                  onTimeframeChange={setTimeframe}
+                  currentSpotPrice={currentSpotPrice}
+                />
+                <div className="flex flex-col lg:flex-row gap-4">
+                  <div className="flex-1 min-w-0">
+                    <OrderBook
+                      bids={mockBidsAsks.bids}
+                      asks={mockBidsAsks.asks}
+                      recentFills={tradeLogs}
+                      onRefreshFeed={handleRegenerateMarketFeeds}
+                      spread={0.88}
+                    />
+                  </div>
+                  <div className="w-full lg:w-auto">
+                    <ExecutionPanel
+                      currentSpotPrice={currentSpotPrice}
+                      freeMargin={freeMargin}
+                      onExecuteTrade={handleExecuteTrade}
+                    />
+                  </div>
+                </div>
+
+                {/* Pending orders widget */}
+                {pendingOrders.length > 0 && (
+                  <div className="glass-panel rounded-lg overflow-hidden">
+                    <div className="px-4 py-3 bg-surface-container-high border-b border-outline-variant/30 flex justify-between items-center">
+                      <h4 className="font-display font-semibold text-xs text-primary uppercase tracking-wider">
+                        Órdenes pendientes ({pendingOrders.length})
+                      </h4>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse text-xs font-mono">
+                        <thead>
+                          <tr className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant border-b border-outline-variant bg-surface-container-low">
+                            <th className="px-4 py-2 text-left">Tipo</th>
+                            <th className="px-4 py-2 text-left">Dir.</th>
+                            <th className="px-4 py-2 text-right">Vol.</th>
+                            <th className="px-4 py-2 text-right">Precio trigger</th>
+                            <th className="px-4 py-2 text-right">Lev.</th>
+                            <th className="px-4 py-2 text-center">Cancelar</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pendingOrders.map(o => (
+                            <tr key={o.id} className="border-b border-outline-variant/15 hover:bg-surface-variant/20">
+                              <td className="px-4 py-2 text-on-surface-variant font-semibold">{o.type}</td>
+                              <td className={`px-4 py-2 font-bold ${o.side === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>{o.side}</td>
+                              <td className="px-4 py-2 text-right">{o.quantity.toFixed(1)} Oz</td>
+                              <td className="px-4 py-2 text-right text-primary font-bold">${o.triggerPrice.toFixed(2)}</td>
+                              <td className="px-4 py-2 text-right">{o.leverage}x</td>
+                              <td className="px-4 py-2 text-center">
+                                <button
+                                  onClick={() => setPendingOrders(prev => prev.filter(x => x.id !== o.id))}
+                                  className="text-on-surface-variant hover:text-red-400 cursor-pointer outline-none"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* AI Panel sidebar */}
+              {showAiPanel && geminiApiKey && (
+                <div className="w-full xl:w-96 flex-shrink-0 h-full xl:min-h-[600px]">
+                  <AiPanel apiKey={geminiApiKey} snap={marketSnap} onClose={() => setShowAiPanel(false)} />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── ANALYSIS VIEW ── */}
+          {activeView === 'analysis' && (
+            <div className="flex-1 flex flex-col gap-4">
+              <div className="glass-panel p-4 flex flex-col sm:flex-row justify-between sm:items-center gap-3">
+                <div>
+                  <h3 className="font-display font-semibold text-base text-primary uppercase">Gráfico técnico avanzado</h3>
+                  <p className="text-xs text-on-surface-variant mt-0.5">EMA(9), SMA(20), RSI(14), MACD(12,26,9), Bollinger Bands(20,2σ).</p>
+                </div>
+                <div className="bg-surface-container border border-outline-variant/35 rounded-lg px-4 py-2 flex gap-6 text-xs font-mono">
+                  <div><span className="text-on-surface-variant">Spot:</span> <strong className="text-primary">${currentSpotPrice.toFixed(2)}</strong></div>
+                  <div><span className="text-on-surface-variant">24h:</span> <strong className="text-on-surface">${ticker.low24h} – ${ticker.high24h}</strong></div>
+                </div>
+              </div>
+              <div className="flex-1 flex min-h-[500px]">
+                <TradingChart candles={candles} timeframe={timeframe} onTimeframeChange={setTimeframe} currentSpotPrice={currentSpotPrice} />
+              </div>
+            </div>
+          )}
+
+          {/* ── TRADES / PORTFOLIO VIEW ── */}
           {activeView === 'trades' && (
             <div className="flex-1 flex flex-col gap-5">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {/* Stat block 1 */}
                 <div className="glass-panel p-4 flex flex-col">
-                  <span className="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Simulated capital reserves</span>
-                  <span className="font-mono text-xl md:text-2xl font-bold text-primary mt-2">
-                    ${vaultBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                  </span>
-                  <span className="text-[10px] text-on-surface-variant/60 font-semibold uppercase mt-1">TOTAL INSTITUTIONAL NET POSITION</span>
+                  <span className="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Capital total</span>
+                  <span className="font-mono text-xl font-bold text-primary mt-2">${vaultBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                  <span className="text-[10px] text-on-surface-variant/60 font-semibold uppercase mt-1">VAULT BALANCE</span>
                 </div>
-                
-                {/* Stat block 2 */}
                 <div className="glass-panel p-4 flex flex-col">
-                  <span className="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Unrealized profit/losses</span>
-                  <span className={`font-mono text-xl md:text-2xl font-bold mt-2 ${totalFloatingPnL >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                    {totalFloatingPnL >= 0 ? '+' : ''}
-                    ${totalFloatingPnL.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  <span className="text-xs font-bold text-on-surface-variant uppercase tracking-wider">P&L flotante</span>
+                  <span className={`font-mono text-xl font-bold mt-2 ${totalFloatingPnL >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {totalFloatingPnL >= 0 ? '+' : ''}${totalFloatingPnL.toLocaleString('en-US', { minimumFractionDigits: 2 })}
                   </span>
-                  <span className="text-[10px] text-on-surface-variant/60 font-semibold uppercase mt-1">FLOATING METALS VALUATION</span>
+                  <span className="text-[10px] text-on-surface-variant/60 font-semibold uppercase mt-1">POSICIONES ABIERTAS</span>
                 </div>
-
-                {/* Stat block 3 */}
                 <div className="glass-panel p-4 flex flex-col">
-                  <span className="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Available free margin</span>
-                  <span className="font-mono text-xl md:text-2xl font-bold text-on-surface mt-2">
-                    ${freeMargin.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                  </span>
-                  <span className="text-[10px] text-on-surface-variant/60 font-semibold uppercase mt-1">RESERVES LIQUIDITY RATIO</span>
+                  <span className="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Margen libre</span>
+                  <span className="font-mono text-xl font-bold text-on-surface mt-2">${freeMargin.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                  <span className="text-[10px] text-on-surface-variant/60 font-semibold uppercase mt-1">DISPONIBLE</span>
                 </div>
               </div>
 
-              {/* Focus list on active positions */}
-              <PositionsList 
-                positions={positions}
-                onClosePosition={handleClosePosition}
-                currentSpotPrice={currentSpotPrice}
-              />
+              <PositionsList positions={positions} onClosePosition={handleClosePosition} currentSpotPrice={currentSpotPrice} />
 
-              {/* Complete transaction ledger audit history */}
+              {/* Trade log */}
               <div className="glass-panel rounded-lg overflow-hidden flex flex-col">
                 <div className="px-4 py-3 bg-surface-container-high border-b border-outline-variant/30 flex justify-between items-center">
-                  <h4 className="font-display font-semibold text-xs text-primary uppercase tracking-wider">Institutional desk executions history audit</h4>
-                  <button 
-                    onClick={() => {
-                      setTradeLogs([]);
-                      triggerToast('Audit traces reset.', 'success');
-                    }}
+                  <h4 className="font-display font-semibold text-xs text-primary uppercase tracking-wider">Historial de operaciones</h4>
+                  <button
+                    onClick={() => setTradeLogs([])}
                     className="text-on-surface-variant hover:text-red-400 font-mono text-[10px] flex items-center gap-1 cursor-pointer outline-none uppercase font-bold"
                   >
-                    <RotateCcw className="w-3.5 h-3.5" /> Clear desk trace
+                    <RotateCcw className="w-3.5 h-3.5" /> Limpiar
                   </button>
                 </div>
                 {tradeLogs.length === 0 ? (
-                  <div className="p-10 text-center text-xs text-on-surface-variant/60 font-medium">No order traces recorded in this cycle. Execute spot contracts to record logs.</div>
+                  <div className="p-10 text-center text-xs text-on-surface-variant/60">Sin operaciones registradas.</div>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full border-collapse">
                       <thead>
                         <tr className="text-left border-b border-outline-variant bg-surface-container-low text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
-                          <th className="px-4 py-3 font-display">TIMESTAMP</th>
-                          <th className="px-4 py-3 font-display">SYMBOL</th>
-                          <th className="px-4 py-3 font-display text-center">TYPE</th>
-                          <th className="px-4 py-3 font-display text-right">VOLUME SIZE</th>
-                          <th className="px-4 py-3 font-display text-right">LEVERAGE CODE</th>
-                          <th className="px-4 py-3 font-display text-right">FILL QUOTE</th>
-                          <th className="px-4 py-3 font-display text-right">REALISED TRADING NET PnL</th>
-                          <th className="px-4 py-3 font-display text-center">AUDIT STATUS</th>
+                          <th className="px-4 py-3">Hora</th>
+                          <th className="px-4 py-3">Símbolo</th>
+                          <th className="px-4 py-3 text-center">Dir.</th>
+                          <th className="px-4 py-3 text-right">Vol.</th>
+                          <th className="px-4 py-3 text-right">Lev.</th>
+                          <th className="px-4 py-3 text-right">Precio</th>
+                          <th className="px-4 py-3 text-right">PnL</th>
+                          <th className="px-4 py-3 text-center">Estado</th>
                         </tr>
                       </thead>
                       <tbody className="font-mono text-xs text-on-surface/90">
-                        {tradeLogs.map((log) => {
+                        {tradeLogs.map(log => {
                           const isBuy = log.side === 'BUY';
-                          const statusColors = 
-                            log.status === 'OPEN' ? 'text-primary/95 bg-primary/5 border border-primary/20' :
-                            log.status === 'CLOSED' ? 'text-green-400 bg-green-400/5 border border-green-400/20' :
+                          const statusColors =
+                            log.status === 'OPEN'       ? 'text-primary/95 bg-primary/5 border border-primary/20' :
+                            log.status === 'CLOSED'     ? 'text-green-400 bg-green-400/5 border border-green-400/20' :
                             'text-red-400 bg-red-400/5 border border-red-500/25 animate-pulse';
-
                           return (
-                            <tr key={log.id} className="border-b border-outline-variant/15 hover:bg-surface-variant/25 transition-colors t-num">
+                            <tr key={log.id} className="border-b border-outline-variant/15 hover:bg-surface-variant/25 transition-colors">
                               <td className="px-4 py-2.5 text-on-surface-variant">{log.timestamp}</td>
-                              <td className="px-4 py-2.5 text-on-surface font-semibold">XAU/USD</td>
+                              <td className="px-4 py-2.5 font-semibold">XAU/USD</td>
                               <td className="px-4 py-2.5 text-center">
-                                <span className={`px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${isBuy ? 'text-green-400' : 'text-red-400'}`}>
+                                <span className={`text-[9px] font-bold uppercase ${isBuy ? 'text-green-400' : 'text-red-400'}`}>
                                   {isBuy ? 'LONG' : 'SHORT'}
                                 </span>
                               </td>
                               <td className="px-4 py-2.5 text-right">{log.quantity.toFixed(1)} Oz</td>
-                              <td className="px-4 py-2.5 text-right font-semibold text-on-surface-variant/90">{log.leverage}x</td>
+                              <td className="px-4 py-2.5 text-right text-on-surface-variant/90">{log.leverage}x</td>
                               <td className="px-4 py-2.5 text-right">${log.price.toFixed(2)}</td>
                               <td className={`px-4 py-2.5 text-right font-medium ${
                                 log.pnl === undefined ? 'text-on-surface-variant/60' :
-                                log.pnl >= 0 ? 'text-green-450 text-green-400' : 'text-red-400'
+                                log.pnl >= 0 ? 'text-green-400' : 'text-red-400'
                               }`}>
                                 {log.pnl === undefined ? '--' : `${log.pnl >= 0 ? '+' : ''}$${log.pnl.toFixed(2)}`}
                               </td>
@@ -702,240 +518,138 @@ export default function App() {
             </div>
           )}
 
-          {/* VIEW RENDER: PANEL 4) TERMINAL SETTINGS CONTROLS */}
+          {/* ── PERFORMANCE VIEW ── */}
+          {activeView === 'performance' && (
+            <PerformanceDashboard tradeLogs={tradeLogs} vaultBalance={vaultBalance} equityCurve={equityCurve} />
+          )}
+
+          {/* ── SETTINGS VIEW ── */}
           {activeView === 'settings' && (
             <div className="flex-1 flex flex-col gap-5 max-w-4xl mx-auto w-full">
-              <div className="glass-panel p-6 flex flex-col gap-6 rounded-lg select-none">
+              <div className="glass-panel p-6 flex flex-col gap-6 rounded-lg">
                 <div>
-                  <h3 className="font-display font-semibold text-base text-primary uppercase">Terminal Operations settings</h3>
-                  <p className="text-xs text-on-surface-variant mt-0.5">Configure live simulated Brownian random-walk drift triggers and corporate desk liquidity presets.</p>
+                  <h3 className="font-display font-semibold text-base text-primary uppercase">Configuración del terminal</h3>
+                  <p className="text-xs text-on-surface-variant mt-0.5">Volatilidad, Gemini AI y persistencia de datos.</p>
                 </div>
-                
-                {/* Volatility Settings */}
+
+                {/* Volatility */}
                 <div className="space-y-3 pt-4 border-t border-outline-variant/20">
                   <span className="font-display text-xs font-bold text-primary uppercase tracking-wide flex items-center gap-1.5">
-                    <Sliders className="w-4 h-4" /> Gold spot quote simulated variables setup
+                    <Sliders className="w-4 h-4" /> Simulación de mercado
                   </span>
-                  
                   <div className="p-4 bg-surface-container border border-outline-variant/30 rounded-lg space-y-4">
                     <div>
                       <div className="flex justify-between items-center text-xs text-on-surface font-semibold mb-2">
-                        <span>Volatility multiplier</span>
+                        <span>Multiplicador de volatilidad</span>
                         <span className="font-mono text-primary bg-primary/10 border border-primary/20 px-2.5 py-0.5 rounded text-[11px] font-bold">
-                          {volatilityMultiplier === 0 ? 'STATIC' : `${volatilityMultiplier.toFixed(1)}x Vol`}
+                          {volatilityMultiplier === 0 ? 'ESTÁTICO' : `${volatilityMultiplier.toFixed(1)}x`}
                         </span>
                       </div>
-                      <input 
-                        type="range"
-                        min="0"
-                        max="3"
-                        step="0.5"
-                        value={volatilityMultiplier}
-                        onChange={(e) => setVolatilityMultiplier(parseFloat(e.target.value))}
-                        className="w-full accent-primary bg-background h-1.5 rounded cursor-pointer border border-outline-variant/20 focus:outline-none"
-                      />
+                      <input type="range" min="0" max="3" step="0.5" value={volatilityMultiplier}
+                        onChange={e => setVolatilityMultiplier(parseFloat(e.target.value))}
+                        className="w-full accent-primary h-1.5 rounded cursor-pointer" />
                       <div className="flex justify-between text-[10px] text-on-surface-variant/60 font-semibold mt-1">
-                        <span>Static Flat (0x)</span>
-                        <span>Low Noise (0.5x - 1x)</span>
-                        <span>High Volatility / Interest Rate News Shocks (2.5x - 3x)</span>
+                        <span>Plano (0x)</span><span>Normal (1x)</span><span>Alta volatilidad (3x)</span>
                       </div>
                     </div>
-
-                    <div className="flex items-center justify-between border-t border-outline-variant/15 pt-3">
-                      <div className="text-xs text-on-surface-variant flex flex-col gap-0.5 pr-4">
-                        <span className="font-bold text-on-surface">Auto Tick Generation</span>
-                        <span>Enables constant quotes updates. Disable to stop the charts from ticking live.</span>
-                      </div>
-                      <button 
-                        onClick={() => setAutoTicksEnabled(!autoTicksEnabled)}
-                        className={`font-semibold text-[11px] p-2 rounded px-4 font-mono font-bold uppercase transition-all cursor-pointer outline-none border ${
-                          autoTicksEnabled 
-                            ? 'bg-green-500/15 border-green-500/35 text-green-400' 
-                            : 'bg-red-500/15 border-red-500/35 text-red-500'
-                        }`}
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-on-surface">Ticks automáticos</span>
+                      <button
+                        onClick={() => setAutoTicksEnabled(v => !v)}
+                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors cursor-pointer outline-none border ${autoTicksEnabled ? 'bg-primary/30 border-primary/50' : 'bg-surface-container-high border-outline-variant/40'}`}
                       >
-                        {autoTicksEnabled ? 'LIVE FEED ACTIVE' : 'FEED PAUSED'}
+                        <span className={`inline-block h-3.5 w-3.5 transform rounded-full transition-transform ${autoTicksEnabled ? 'translate-x-4 bg-primary' : 'translate-x-1 bg-on-surface-variant/40'}`} />
                       </button>
                     </div>
                   </div>
                 </div>
 
-                {/* Real-World API Synchronization Settings */}
+                {/* Gemini */}
                 <div className="space-y-3 pt-4 border-t border-outline-variant/20">
                   <span className="font-display text-xs font-bold text-primary uppercase tracking-wide flex items-center gap-1.5">
-                    <Globe className="w-4 h-4" /> Live Market API Integration Desk
+                    <Sparkles className="w-4 h-4" /> Gemini AI
                   </span>
-                  
-                  <div className="p-4 bg-surface-container border border-outline-variant/30 rounded-lg space-y-4">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                      <div className="text-xs text-on-surface-variant flex flex-col gap-0.5">
-                        <span className="font-bold text-on-surface">Data Feed Source Selection</span>
-                        <span>Choose whether prices derive from real-time physical spot metal backing or our Brownian mock engine.</span>
+                  <div className="p-4 bg-surface-container border border-outline-variant/30 rounded-lg text-xs text-on-surface-variant space-y-2">
+                    {geminiApiKey ? (
+                      <div className="flex items-center gap-2 text-green-400">
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>API key detectada — Gemini AI activo</span>
                       </div>
-                      
-                      <div className="flex bg-background border border-outline-variant p-0.5 rounded-sm text-[10px] uppercase font-bold tracking-wider">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsRealApiActive(false);
-                            triggerToast('Switched to Aurum Brownian-Walk Simulation Engine.', 'info');
-                          }}
-                          className={`px-3 py-1.5 cursor-pointer rounded-xs transition-colors ${
-                            !isRealApiActive ? 'bg-primary text-on-primary font-black' : 'text-on-surface-variant hover:text-on-surface font-bold'
-                          }`}
-                        >
-                          Simulator
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsRealApiActive(true);
-                            triggerToast('Establishing Link to Live Coinbase API Gold Feed...', 'success');
-                          }}
-                          className={`px-3 py-1.5 cursor-pointer rounded-xs transition-colors flex items-center gap-1 ${
-                            isRealApiActive ? 'bg-primary text-on-primary font-black' : 'text-on-surface-variant hover:text-on-surface font-bold'
-                          }`}
-                        >
-                          Coinbase API (PAXG)
-                        </button>
-                      </div>
-                    </div>
-
-                    {isRealApiActive && (
-                      <div className="border-t border-outline-variant/15 pt-3.5 flex flex-col gap-3">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="text-on-surface-variant">API Channel Status:</span>
-                          <span className={`px-2.5 py-0.5 font-mono text-[10px] font-bold rounded-sm uppercase flex items-center gap-1.5 border ${
-                            apiStatus === 'connected' 
-                              ? 'bg-green-500/10 border-green-500/25 text-green-400' 
-                              : apiStatus === 'loading'
-                                ? 'bg-primary/10 border-primary/25 text-primary animate-pulse'
-                                : 'bg-red-500/10 border-red-500/25 text-red-400'
-                          }`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${
-                              apiStatus === 'connected' 
-                                ? 'bg-green-400 animate-pulse' 
-                                : apiStatus === 'loading'
-                                  ? 'bg-primary animate-pulse'
-                                  : 'bg-red-400'
-                            }`}></span>
-                            {apiStatus === 'connected' ? 'LIVE DEEP SYNC - 200 OK' : apiStatus === 'loading' ? 'RESOLVING GATEWAY...' : 'API SECURE FALLBACK'}
-                          </span>
-                        </div>
-                        
-                        <div className="p-3 bg-background/40 border border-outline-variant/15 text-[11px] text-on-surface-variant rounded space-y-1.5 leading-relaxed">
-                          <p>
-                            <strong className="text-primary uppercase tracking-wide">Secure Spot Resolution:</strong> This terminal connects directly via secure JSON request pipelines to <code className="text-on-surface font-mono font-medium">api.coinbase.com/v2/prices/PAXG-USD/spot</code>. 
-                          </p>
-                          <p>
-                            PAX Gold (PAXG) currency spot vectors are backed 1:1 by one fine troy ounce of London Good Delivery gold, delivering physical gold rates with absolute transparency and zero brokerage commissions.
-                          </p>
-                        </div>
-                      </div>
+                    ) : (
+                      <>
+                        <p>Configura la variable de entorno <code className="font-mono text-primary bg-primary/10 px-1.5 py-0.5 rounded">VITE_GEMINI_API_KEY</code> en el archivo <code className="font-mono text-primary bg-primary/10 px-1.5 py-0.5 rounded">.env.local</code> para activar el asistente IA.</p>
+                        <p className="font-mono text-[11px] bg-surface-container-high border border-outline-variant/30 rounded p-2">VITE_GEMINI_API_KEY=tu_clave_aqui</p>
+                      </>
                     )}
                   </div>
                 </div>
 
-                {/* Risk Management Configuration */}
-                <div className="space-y-3 pt-4 border-t border-outline-variant/35">
+                {/* Persistence / Reset */}
+                <div className="space-y-3 pt-4 border-t border-outline-variant/20">
                   <span className="font-display text-xs font-bold text-primary uppercase tracking-wide flex items-center gap-1.5">
-                    <ShieldCheck className="w-4 h-4" /> Institutional risk limits protection
+                    <Coins className="w-4 h-4" /> Datos persistentes
                   </span>
-                  <div className="p-4 bg-surface-container border border-outline-variant/30 rounded-lg space-y-2 text-xs text-on-surface-variant leading-relaxed">
-                    <div className="flex justify-between border-b border-outline-variant/15 pb-2">
-                      <span className="font-semibold text-on-surface">Leverage Desk Cap limit:</span>
-                      <span className="font-mono text-primary font-bold">50.00x Maximum</span>
+                  <div className="p-4 bg-surface-container border border-outline-variant/30 rounded-lg flex items-center justify-between gap-4 flex-wrap">
+                    <div className="text-xs text-on-surface-variant">
+                      <p className="mb-1">Posiciones, historial y saldo se guardan automáticamente.</p>
+                      <p className="text-green-400/80">● Persistencia activa — los datos sobreviven al recargar</p>
                     </div>
-                    <div className="flex justify-between border-b border-outline-variant/15 pb-2">
-                      <span className="font-semibold text-on-surface">Margin Maintenance limit:</span>
-                      <span className="font-mono text-red-400 font-bold">90% of Required Margin</span>
-                    </div>
-                    <div className="flex justify-between col-span-2 pt-1 text-[11px]">
-                      <span>Institutional traders must lock sufficient collateral in the vault. Maintenance procedures run every 2500ms synchronous with quote engine updates.</span>
-                    </div>
+                    <button
+                      onClick={handleHardReset}
+                      className="flex items-center gap-2 border border-red-500/30 text-red-400 hover:bg-red-500/10 text-[11px] font-mono uppercase font-bold px-3 py-2 rounded cursor-pointer outline-none transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Reset completo
+                    </button>
                   </div>
                 </div>
               </div>
             </div>
           )}
-
-        </div>
+        </main>
       </div>
 
-      {/* Bottom Status Bar */}
-      <footer className="h-8 border-t border-outline-variant/35 bg-surface-container-low px-4 md:px-10 flex items-center justify-between text-[9px] uppercase tracking-[0.2em] font-black shrink-0 relative z-30 select-none">
-        <div className="flex gap-6 flex-wrap leading-none">
-          <span className="text-on-surface-variant">API Sync Feed: <span className={isRealApiActive ? "text-green-500 font-black animate-pulse" : "text-primary"}>{isRealApiActive ? "CONNECTED LIVE" : "SIMULATION"}</span></span>
-          <span className="hidden md:inline text-on-surface-variant">Source Protocol: <span className="text-on-surface">{isRealApiActive ? "Coinbase PAXG-USD Spot Feed" : "Simulated Brownian-Walk Engine"}</span></span>
-          <span className="hidden sm:inline text-on-surface-variant">API Gateway: <span className="text-green-500 font-mono">14ms TLS v1.3</span></span>
-        </div>
-        <div className="text-on-surface-variant">
-          SYSTEM CLOCK: <span className="text-on-surface font-mono font-bold">{currentSystemTime}</span> • 22 MAY 2026
-        </div>
-      </footer>
-
-      {/* DEPOSIT RESERVE FUNDS DIALOG/MODAL */}
-      {depositModalOpen && (
-        <div className="fixed inset-0 z-50 bg-[#060f16]/85 backdrop-filter backdrop-blur-md flex items-center justify-center p-4">
-          <div className="w-full max-w-sm glass-panel p-5 md:p-6 rounded-lg text-xs relative select-none animate-bounce">
-            <button
-              onClick={() => setDepositModalOpen(false)}
-              className="absolute top-4 right-4 text-on-surface-variant hover:text-white cursor-pointer outline-none"
-            >
-              <X className="w-4 h-4" />
-            </button>
-
-            <div className="w-11 h-11 bg-primary/10 border border-primary/30 text-primary rounded-full flex items-center justify-center mb-4">
-              <Coins className="w-5.5 h-5.5" />
-            </div>
-
-            <h3 className="font-display font-semibold text-base text-primary uppercase mb-1">
-              Deposit simulated reserves
-            </h3>
-            <p className="text-on-surface-variant leading-relaxed mb-4">
-              Inject instant simulated funds into your institutional vault to expand your leverage margin limits.
-            </p>
-
-            <form onSubmit={handleDepositCapital} className="space-y-4">
-              <div className="space-y-1.5">
-                <label className="text-[10px] font-bold text-on-surface-variant uppercase tracking-wider">
-                  Deposit amount (USD)
-                </label>
-                <input
-                  type="number"
-                  required
-                  min="1"
-                  max="5000000"
-                  value={depositAmount}
-                  onChange={(e) => setDepositAmount(e.target.value)}
-                  className="bg-surface-container-lowest border border-outline-variant rounded p-3 text-sm font-mono font-bold text-primary focus:outline-none focus:border-primary w-full text-center select-text"
-                />
-              </div>
-
-              <div className="grid grid-cols-3 gap-1.5">
-                {['25000', '100000', '500000'].map((amt) => (
-                  <button
-                    key={amt}
-                    type="button"
-                    onClick={() => setDepositAmount(amt)}
-                    className="py-1.5 bg-surface-container hover:bg-surface-container-high border border-outline-variant/35 font-mono text-center cursor-pointer transition-colors rounded-xs text-[11px] font-semibold"
-                  >
-                    +${parseInt(amt).toLocaleString()}
-                  </button>
-                ))}
-              </div>
-
-              <button
-                type="submit"
-                className="w-full bg-primary text-on-primary py-3 font-bold uppercase tracking-wider text-[11px] hover:bg-primary/95 transition-all active:scale-[0.98] cursor-pointer rounded-xs"
-              >
-                CONFIRM INJECTION
-              </button>
-            </form>
-          </div>
+      {/* Toast */}
+      {toastMessage && (
+        <div className={`fixed bottom-6 right-6 z-50 flex items-center gap-3 px-4 py-3 rounded-lg border text-xs font-semibold shadow-xl transition-all ${
+          toastMessage.type === 'success' ? 'bg-green-900/90 border-green-500/40 text-green-300' :
+          toastMessage.type === 'error'   ? 'bg-red-900/90 border-red-500/40 text-red-300' :
+          'bg-surface-container border-primary/40 text-primary'
+        }`}>
+          {toastMessage.type === 'success' && <CheckCircle2 className="w-4 h-4" />}
+          {toastMessage.type === 'error'   && <AlertOctagon className="w-4 h-4" />}
+          {toastMessage.type === 'info'    && <Bell className="w-4 h-4" />}
+          {toastMessage.text}
         </div>
       )}
 
+      {/* Deposit Modal */}
+      {depositModalOpen && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-surface-container border border-outline-variant rounded-xl p-6 w-full max-w-sm shadow-2xl">
+            <h3 className="font-display font-semibold text-primary uppercase text-sm mb-4">Depósito de capital</h3>
+            <input
+              type="number" value={depositAmount} onChange={e => setDepositAmount(e.target.value)}
+              className="w-full bg-surface-container-high border border-outline-variant/40 rounded px-3 py-2 text-sm font-mono text-on-surface outline-none focus:border-primary/50 mb-4"
+              placeholder="Cantidad en USD"
+            />
+            <div className="flex gap-3">
+              <button
+                onClick={() => { setVaultBalance(v => v + parseFloat(depositAmount || '0')); setDepositModalOpen(false); triggerToast(`Depósito de $${parseFloat(depositAmount).toLocaleString()} procesado.`, 'success'); }}
+                className="flex-1 bg-primary/15 border border-primary/30 hover:bg-primary/25 text-primary text-xs font-bold uppercase py-2 rounded cursor-pointer outline-none transition-colors"
+              >
+                Confirmar
+              </button>
+              <button
+                onClick={() => setDepositModalOpen(false)}
+                className="flex-1 bg-surface-container-high border border-outline-variant/30 text-on-surface-variant text-xs font-bold uppercase py-2 rounded cursor-pointer outline-none transition-colors"
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

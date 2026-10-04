@@ -19,7 +19,7 @@ export interface Position {
   id: string;
   side: OrderSide;
   symbol: string;
-  quantity: number; // in ounces
+  quantity: number;
   leverage: number;
   entryPrice: number;
   currentPrice: number;
@@ -31,9 +31,9 @@ export interface Position {
 
 export interface OrderBookEntry {
   price: number;
-  size: number; // Quantity in ounces
+  size: number;
   total: number;
-  percentage: number; // For rendering cumulative size indicators
+  percentage: number;
 }
 
 export interface TradeLog {
@@ -41,10 +41,13 @@ export interface TradeLog {
   timestamp: string;
   side: OrderSide;
   price: number;
+  closePrice?: number;
   quantity: number;
   leverage: number;
-  pnl?: number; // Filled if close
+  pnl?: number;
   status: 'OPEN' | 'CLOSED' | 'LIQUIDATED';
+  /** ISO string for equity curve sorting */
+  closedAt?: string;
 }
 
 export interface MarketNews {
@@ -65,4 +68,22 @@ export interface TickerInfo {
   volume24h: number;
   high24h: number;
   low24h: number;
+}
+
+/** A pending conditional order waiting to trigger */
+export interface PendingOrder {
+  id: string;
+  type: 'LIMIT' | 'STOP_LOSS';
+  side: OrderSide;
+  quantity: number;
+  leverage: number;
+  triggerPrice: number;
+  createdAt: string;
+  positionId?: string;
+}
+
+/** A point on the portfolio equity curve */
+export interface EquityPoint {
+  timestamp: string;
+  balance: number;
 }
